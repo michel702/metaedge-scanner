@@ -3,7 +3,7 @@ import re
 import json
 import time
 import hashlib
-from datetime import datetime
+from datetime import datetime, UTC
 
 import requests
 
@@ -20,13 +20,11 @@ POLY_LIMIT = int(os.getenv("POLY_LIMIT", "500"))
 MAX_ALERTS_PER_LOOP = int(os.getenv("MAX_ALERTS_PER_LOOP", "5"))
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/3.0",
+    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/4.0",
     "Accept": "application/json",
 }
 
-# Base pública oficial da Kalshi para market data sem auth
 KALSHI_URL = "https://api.elections.kalshi.com/trade-api/v2/markets"
-# Gamma API pública oficial da Polymarket
 POLY_URL = "https://gamma-api.polymarket.com/markets"
 
 session = requests.Session()
@@ -39,7 +37,7 @@ SEEN_ALERTS = set()
 # HELPERS
 # =========================
 def now() -> str:
-    return datetime.utcnow().strftime("%H:%M:%S")
+    return datetime.now(UTC).strftime("%H:%M:%S")
 
 
 def to_float(value, default=0.0):
@@ -71,7 +69,6 @@ def tokenize(text: str):
 
 
 def is_valid_price(price: float) -> bool:
-    # elimina 0, 1 e extremos que estavam gerando edge fake
     return price is not None and 0.05 < price < 0.95
 
 
@@ -88,9 +85,6 @@ def overlap_score(title_a: str, title_b: str) -> int:
 
 
 def titles_match(title_a: str, title_b: str) -> bool:
-    """
-    Matching conservador para reduzir falso positivo.
-    """
     a = normalize_text(title_a)
     b = normalize_text(title_b)
 
@@ -115,14 +109,36 @@ def alert_key(k_title: str, p_title: str, edge: float) -> str:
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def safe_get_json(url, params=None):
+    try:
+        res = session.get(url, params=params, timeout=20)
+
+        if res.status_code != 200:
+            print(f"[{now()}] HTTP ERROR {res.status_code} -> {url}")
+            print(f"[{now()}] BODY PREVIEW: {res.text[:200]}")
+            return None
+
+        body = res.text.strip()
+        if not body:
+            print(f"[{now()}] EMPTY BODY -> {url}")
+            return None
+
+        try:
+            return res.json()
+        except Exception:
+            print(f"[{now()}] NON-JSON BODY -> {url}")
+            print(f"[{now()}] BODY PREVIEW: {body[:200]}")
+            return None
+
+    except Exception as e:
+        print(f"[{now()}] REQUEST ERROR -> {url} -> {e}")
+        return None
+
+
 # =========================
 # KALSHI
 # =========================
 def extract_kalshi_price(market: dict):
-    """
-    Tenta campos públicos mais úteis.
-    Os campos em /markets costumam vir em centavos.
-    """
     candidates = [
         ("yes_ask", 100.0),
         ("yes_bid", 100.0),
@@ -150,67 +166,43 @@ def fetch_kalshi():
     params = {
         "status": "open",
         "limit": KALSHI_LIMIT,
-        "mve_filter": "exclude",  # evita combos/multivariate
+        "mve_filter": "exclude",
     }
 
-    try:
-        res = session.get(KALSHI_URL, params=params, timeout=20)
-
-        if res.status_code != 200:
-            print(f"[{now()}] Kalshi HTTP {res.status_code}")
-            print(f"[{now()}] Kalshi body preview: {res.text[:200]}")
-            return []
-
-        # evita JSONDecodeError em resposta vazia/html
-        body = res.text.strip()
-        if not body:
-            print(f"[{now()}] Kalshi body vazio")
-            return []
-
-        try:
-            data = res.json()
-        except Exception:
-            print(f"[{now()}] Kalshi resposta não-JSON: {body[:200]}")
-            return []
-
-        raw_markets = data.get("markets", [])
-        markets = []
-
-        for m in raw_markets:
-            title = normalize_text(m.get("title", ""))
-            volume = to_float(m.get("volume", 0))
-            price = extract_kalshi_price(m)
-
-            if not title:
-                continue
-            if not is_valid_volume(volume, MIN_KALSHI_VOL):
-                continue
-            if price is None or not is_valid_price(price):
-                continue
-
-            markets.append({
-                "title": title,
-                "yes_price": price,
-                "volume": volume,
-                "ticker": m.get("ticker", ""),
-                "source": "kalshi",
-            })
-
-        return markets
-
-    except Exception as e:
-        print(f"[{now()}] Kalshi ERROR: {e}")
+    data = safe_get_json(KALSHI_URL, params=params)
+    if not data:
         return []
+
+    raw_markets = data.get("markets", [])
+    markets = []
+
+    for m in raw_markets:
+        title = normalize_text(m.get("title", ""))
+        volume = to_float(m.get("volume", 0))
+        price = extract_kalshi_price(m)
+
+        if not title:
+            continue
+        if not is_valid_volume(volume, MIN_KALSHI_VOL):
+            continue
+        if price is None or not is_valid_price(price):
+            continue
+
+        markets.append({
+            "title": title,
+            "yes_price": price,
+            "volume": volume,
+            "ticker": m.get("ticker", ""),
+            "source": "kalshi",
+        })
+
+    return markets
 
 
 # =========================
 # POLYMARKET
 # =========================
 def extract_poly_price(market: dict):
-    """
-    Primeiro tenta lastTradePrice.
-    Depois tenta outcomePrices.
-    """
     last_trade = market.get("lastTradePrice")
     if last_trade not in (None, ""):
         return to_float(last_trade, default=None)
@@ -244,47 +236,33 @@ def fetch_polymarket():
         "closed": "false",
     }
 
-    try:
-        res = session.get(POLY_URL, params=params, timeout=20)
-
-        if res.status_code != 200:
-            print(f"[{now()}] Polymarket HTTP {res.status_code}")
-            print(f"[{now()}] Polymarket body preview: {res.text[:200]}")
-            return []
-
-        data = res.json()
-        if not isinstance(data, list):
-            print(f"[{now()}] Polymarket resposta inesperada")
-            return []
-
-        markets = []
-
-        for m in data:
-            title = normalize_text(m.get("question", ""))
-            # volume vem como string na Gamma API
-            volume = to_float(m.get("volume", 0))
-            price = extract_poly_price(m)
-
-            if not title:
-                continue
-            if not is_valid_volume(volume, MIN_POLY_VOL):
-                continue
-            if price is None or not is_valid_price(price):
-                continue
-
-            markets.append({
-                "title": title,
-                "yes_price": price,
-                "volume": volume,
-                "slug": m.get("slug", ""),
-                "source": "polymarket",
-            })
-
-        return markets
-
-    except Exception as e:
-        print(f"[{now()}] Polymarket ERROR: {e}")
+    data = safe_get_json(POLY_URL, params=params)
+    if not data or not isinstance(data, list):
         return []
+
+    markets = []
+
+    for m in data:
+        title = normalize_text(m.get("question", ""))
+        volume = to_float(m.get("volume", 0))
+        price = extract_poly_price(m)
+
+        if not title:
+            continue
+        if not is_valid_volume(volume, MIN_POLY_VOL):
+            continue
+        if price is None or not is_valid_price(price):
+            continue
+
+        markets.append({
+            "title": title,
+            "yes_price": price,
+            "volume": volume,
+            "slug": m.get("slug", ""),
+            "source": "polymarket",
+        })
+
+    return markets
 
 
 # =========================
