@@ -9,7 +9,7 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", 30))
 
 
 def fetch_kalshi():
-    url = "https://trading-api.kalshi.com/v1/markets"
+    url = "https://api.elections.kalshi.com/trade-api/v2/markets"
 
     try:
         res = requests.get(url)
@@ -23,9 +23,14 @@ def fetch_kalshi():
             if volume < MIN_KALSHI_VOL:
                 continue
 
+            yes_price = m.get("yes_ask", None)
+
+            if yes_price is None:
+                continue
+
             markets.append({
                 "title": m.get("title", "").lower(),
-                "yes_price": m.get("yes_price", 0) / 100,  # Kalshi vem em cents
+                "yes_price": yes_price / 100,
                 "volume": volume
             })
 
@@ -51,9 +56,14 @@ def fetch_polymarket():
             if volume < MIN_POLY_VOL:
                 continue
 
+            price = m.get("lastTradePrice", None)
+
+            if price is None:
+                continue
+
             markets.append({
                 "title": m.get("question", "").lower(),
-                "yes_price": float(m.get("lastTradePrice", 0)),
+                "yes_price": float(price),
                 "volume": volume
             })
 
@@ -65,17 +75,26 @@ def fetch_polymarket():
 
 
 def find_edges(kalshi, poly):
+    found = False
+
     for k in kalshi:
         for p in poly:
+            # matching simples (melhoraremos depois)
             if k["title"][:30] in p["title"] or p["title"][:30] in k["title"]:
+
                 edge = p["yes_price"] - k["yes_price"]
 
                 if abs(edge) > EDGE_THRESHOLD:
+                    found = True
+
                     print("\n🚨 EDGE FOUND 🚨")
                     print("Market:", k["title"][:80])
                     print("Kalshi:", round(k["yes_price"], 3))
                     print("Poly:", round(p["yes_price"], 3))
                     print("Edge:", round(edge, 3))
+
+    if not found:
+        print("Nenhuma oportunidade acima de", EDGE_THRESHOLD)
 
 
 while True:
