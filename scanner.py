@@ -1,145 +1,92 @@
-import os
-import time
 import requests
-from datetime import datetime
+import time
+import os
 
-EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.10"))
-MIN_KALSHI_VOL = float(os.getenv("MIN_KALSHI_VOL", "100000"))
-MIN_POLY_VOL = float(os.getenv("MIN_POLY_VOL", "500000"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
-
-
-def now():
-    return datetime.utcnow().strftime("%H:%M:%S")
+EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", 0.10))
+MIN_KALSHI_VOL = int(os.getenv("MIN_KALSHI_VOL", 100000))
+MIN_POLY_VOL = int(os.getenv("MIN_POLY_VOL", 100000))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", 30))
 
 
-def get_kalshi():
+def fetch_kalshi():
+    url = "https://trading-api.kalshi.com/v1/markets"
+
     try:
-        url = "https://api.elections.kalshi.com/trade-api/v2/markets?status=open"
-        r = requests.get(url, timeout=10)
+        res = requests.get(url)
+        data = res.json()
 
-        if r.status_code != 200:
-            print(f"Kalshi HTTP {r.status_code}")
-            return []
-
-        data = r.json()
         markets = []
 
         for m in data.get("markets", []):
-            prob = m.get("yes_ask")
-            vol = m.get("volume", 0)
+            volume = m.get("volume", 0)
 
-            if prob is None:
+            if volume < MIN_KALSHI_VOL:
                 continue
 
-            prob = prob / 100 if prob > 1 else prob
-
             markets.append({
-                "title": m.get("title", ""),
-                "prob": prob,
-                "volume": vol
+                "title": m.get("title", "").lower(),
+                "yes_price": m.get("yes_price", 0) / 100,  # Kalshi vem em cents
+                "volume": volume
             })
 
         return markets
 
     except Exception as e:
-        print(f"Kalshi error: {e}")
+        print("Erro Kalshi:", e)
         return []
 
 
-def get_poly():
+def fetch_polymarket():
+    url = "https://gamma-api.polymarket.com/markets"
+
     try:
-        url = "https://gamma-api.polymarket.com/markets?active=true"
-        r = requests.get(url, timeout=10)
+        res = requests.get(url)
+        data = res.json()
 
-        if r.status_code != 200:
-            print(f"Polymarket HTTP {r.status_code}")
-            return []
-
-        data = r.json()
         markets = []
 
         for m in data:
-            prob = m.get("lastTradePrice")
-            vol = m.get("volume", 0)
+            volume = m.get("volume", 0)
 
-            if prob is None:
+            if volume < MIN_POLY_VOL:
                 continue
 
-            prob = float(prob)
-            prob = prob / 100 if prob > 1 else prob
-
             markets.append({
-                "title": m.get("question", ""),
-                "prob": prob,
-                "volume": vol
+                "title": m.get("question", "").lower(),
+                "yes_price": float(m.get("lastTradePrice", 0)),
+                "volume": volume
             })
 
         return markets
 
     except Exception as e:
-        print(f"Polymarket error: {e}")
+        print("Erro Polymarket:", e)
         return []
 
 
-def is_possible_match(k_title, p_title):
-    k_words = k_title.lower().split()
-    p_title_lower = p_title.lower()
-
-    # matching bem simples pro MVP
-    for word in k_words[:3]:
-        if len(word) > 3 and word in p_title_lower:
-            return True
-
-    return False
-
-
-def compare(kalshi, poly):
-    found = False
-
+def find_edges(kalshi, poly):
     for k in kalshi:
         for p in poly:
-            if k["volume"] < MIN_KALSHI_VOL:
-                continue
+            if k["title"][:30] in p["title"] or p["title"][:30] in k["title"]:
+                edge = p["yes_price"] - k["yes_price"]
 
-            if p["volume"] < MIN_POLY_VOL:
-                continue
-
-            if not is_possible_match(k["title"], p["title"]):
-                continue
-
-            edge = abs(k["prob"] - p["prob"])
-
-            if edge >= EDGE_THRESHOLD:
-                found = True
-                print("\n🚨 OPORTUNIDADE 🚨")
-                print(f"[{now()}] EDGE: {round(edge * 100, 2)}%")
-                print(f"Kalshi: {round(k['prob'] * 100, 2)}% | Vol: {k['volume']} | {k['title']}")
-                print(f"Poly:   {round(p['prob'] * 100, 2)}% | Vol: {p['volume']} | {p['title']}")
-                print("-" * 80)
-
-    if not found:
-        print(f"[{now()}] Nenhuma oportunidade acima de {EDGE_THRESHOLD * 100:.0f}%")
+                if abs(edge) > EDGE_THRESHOLD:
+                    print("\n🚨 EDGE FOUND 🚨")
+                    print("Market:", k["title"][:80])
+                    print("Kalshi:", round(k["yes_price"], 3))
+                    print("Poly:", round(p["yes_price"], 3))
+                    print("Edge:", round(edge, 3))
 
 
-def main():
-    while True:
-        try:
-            print(f"\n[{now()}] scanning...")
+while True:
+    print("\n--- scanning ---")
 
-            kalshi = get_kalshi()
-            poly = get_poly()
+    kalshi = fetch_kalshi()
+    poly = fetch_polymarket()
 
-            print(f"[{now()}] Kalshi markets: {len(kalshi)}")
-            print(f"[{now()}] Polymarket markets: {len(poly)}")
+    print("Kalshi markets:", len(kalshi))
+    print("Polymarket markets:", len(poly))
 
-            compare(kalshi, poly)
+    find_edges(kalshi, poly)
 
-        except Exception as e:
-            print(f"MAIN ERROR: {e}")
-
-        time.sleep(POLL_SECONDS)
-
-
-if __name__ == "__main__":
-    main()
+    time.sleep(POLL_SECONDS)
