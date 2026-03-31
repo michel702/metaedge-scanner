@@ -1,260 +1,168 @@
-import os
-import re
-import time
-import json
 import requests
+import time
 from datetime import datetime
 
-EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.10"))
-MIN_KALSHI_VOL = float(os.getenv("MIN_KALSHI_VOL", "0"))      # debug primeiro
-MIN_POLY_VOL = float(os.getenv("MIN_POLY_VOL", "0"))          # debug primeiro
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
-KALSHI_LIMIT = int(os.getenv("KALSHI_LIMIT", "1000"))
-POLY_LIMIT = int(os.getenv("POLY_LIMIT", "200"))
+# ========================
+# CONFIG
+# ========================
+POLL_SECONDS = 60
+EDGE_THRESHOLD = 0.05  # 5%
+MIN_VOLUME = 1000
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/1.0",
-    "Accept": "application/json",
-}
+KALSHI_URL = "https://trading-api.kalshi.com/trade-api/v2/markets"
+POLYMARKET_URL = "https://gamma-api.polymarket.com/markets"
 
-session = requests.Session()
-session.headers.update(HEADERS)
-
-
+# ========================
+# UTILS
+# ========================
 def now():
-    return datetime.utcnow().strftime("%H:%M:%S")
+    return datetime.now().strftime("%H:%M:%S")
 
 
-def to_float(value, default=0.0):
+def safe_float(value, default=0.0):
     try:
-        if value is None or value == "":
-            return default
         return float(value)
-    except Exception:
+    except:
         return default
 
 
-def normalize_text(text: str) -> str:
-    text = (text or "").lower().strip()
-    text = re.sub(r"[^a-z0-9\s$><.=/-]", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text
+def normalize(text: str) -> str:
+    return text.lower().strip()
 
 
-def extract_kalshi_price(market: dict):
-    """
-    Tenta vários campos porque a resposta pode variar.
-    Preferimos ask/bid em centavos ou em dólares; se não houver, tentamos last price.
-    """
-    candidates = [
-        ("yes_ask", 100.0),
-        ("yes_bid", 100.0),
-        ("last_price", 100.0),
-        ("yes_ask_dollars", 1.0),
-        ("yes_bid_dollars", 1.0),
-        ("last_price_dollars", 1.0),
-    ]
-
-    for key, divisor in candidates:
-        value = market.get(key)
-        if value is None or value == "":
-            continue
-        num = to_float(value, default=None)
-        if num is None:
-            continue
-        return num / divisor
-
-    return None
-
-
+# ========================
+# FETCH KALSHI
+# ========================
 def fetch_kalshi():
-    """
-    Endpoint oficial público da Kalshi.
-    """
-    url = "https://api.elections.kalshi.com/trade-api/v2/markets"
-    params = {
-        "status": "open",
-        "limit": KALSHI_LIMIT,
-    }
-
     try:
-        res = session.get(url, params=params, timeout=20)
-        print(f"[{now()}] Kalshi HTTP: {res.status_code}")
-
-        if res.status_code != 200:
-            print(f"[{now()}] Kalshi body preview: {res.text[:300]}")
-            return []
-
+        res = requests.get(KALSHI_URL, timeout=10)
         data = res.json()
-        raw_markets = data.get("markets", [])
-
-        print(f"[{now()}] Kalshi raw markets: {len(raw_markets)}")
 
         markets = []
-        skipped_no_price = 0
-
-        for m in raw_markets:
-            title = normalize_text(m.get("title", ""))
-            volume = to_float(m.get("volume", 0))
-            price = extract_kalshi_price(m)
-
-            if volume < MIN_KALSHI_VOL:
+        for m in data.get("markets", []):
+            try:
+                markets.append({
+                    "ticker": m.get("ticker"),
+                    "question": normalize(m.get("title", "")),
+                    "price": safe_float(m.get("yes_bid", 0)) / 100,
+                    "volume": safe_float(m.get("volume", 0))
+                })
+            except:
                 continue
 
-            if not title:
-                continue
-
-            if price is None:
-                skipped_no_price += 1
-                continue
-
-            markets.append({
-                "title": title,
-                "yes_price": price,
-                "volume": volume,
-                "source": "kalshi",
-                "ticker": m.get("ticker", ""),
-            })
-
-        print(f"[{now()}] Kalshi usable markets: {len(markets)} | skipped_no_price: {skipped_no_price}")
         return markets
 
     except Exception as e:
-        print(f"[{now()}] Erro Kalshi: {e}")
+        print(f"[{now()}] Kalshi ERROR: {e}")
         return []
 
 
-def extract_poly_price(market: dict):
-    """
-    Primeiro tenta lastTradePrice.
-    Depois tenta outcomePrices quando houver.
-    """
-    last_trade = market.get("lastTradePrice")
-    if last_trade not in (None, ""):
-        return to_float(last_trade, default=None)
-
-    outcomes = market.get("outcomes")
-    outcome_prices = market.get("outcomePrices")
-
-    try:
-        if isinstance(outcomes, str):
-            outcomes = json.loads(outcomes)
-        if isinstance(outcome_prices, str):
-            outcome_prices = json.loads(outcome_prices)
-
-        if isinstance(outcomes, list) and isinstance(outcome_prices, list):
-            for outcome, price in zip(outcomes, outcome_prices):
-                if str(outcome).strip().lower() == "yes":
-                    return to_float(price, default=None)
-
-            if outcome_prices:
-                return to_float(outcome_prices[0], default=None)
-    except Exception:
-        pass
-
-    return None
-
-
+# ========================
+# FETCH POLYMARKET
+# ========================
 def fetch_polymarket():
-    url = "https://gamma-api.polymarket.com/markets"
-    params = {
-        "limit": POLY_LIMIT,
-    }
-
     try:
-        res = session.get(url, params=params, timeout=20)
-        print(f"[{now()}] Polymarket HTTP: {res.status_code}")
-
-        if res.status_code != 200:
-            print(f"[{now()}] Polymarket body preview: {res.text[:300]}")
-            return []
-
+        res = requests.get(POLYMARKET_URL, timeout=10)
         data = res.json()
-        if not isinstance(data, list):
-            print(f"[{now()}] Polymarket unexpected type: {type(data)}")
-            return []
-
-        print(f"[{now()}] Polymarket raw markets: {len(data)}")
 
         markets = []
-        skipped_no_price = 0
-
         for m in data:
-            title = normalize_text(m.get("question", ""))
-            volume = to_float(m.get("volume", 0))
-            price = extract_poly_price(m)
-
-            if volume < MIN_POLY_VOL:
+            try:
+                markets.append({
+                    "slug": m.get("slug"),
+                    "question": normalize(m.get("question", "")),
+                    "price": safe_float(m.get("lastTradePrice", 0)),
+                    "volume": safe_float(m.get("volume", 0))
+                })
+            except:
                 continue
 
-            if not title:
-                continue
-
-            if price is None:
-                skipped_no_price += 1
-                continue
-
-            markets.append({
-                "title": title,
-                "yes_price": price,
-                "volume": volume,
-                "source": "polymarket",
-                "slug": m.get("slug", ""),
-            })
-
-        print(f"[{now()}] Polymarket usable markets: {len(markets)} | skipped_no_price: {skipped_no_price}")
         return markets
 
     except Exception as e:
-        print(f"[{now()}] Erro Polymarket: {e}")
+        print(f"[{now()}] Polymarket ERROR: {e}")
         return []
 
 
-def titles_match(a: str, b: str) -> bool:
-    if not a or not b:
-        return False
-
-    if a[:30] in b or b[:30] in a:
-        return True
-
-    a_words = [w for w in a.split() if len(w) > 4][:5]
-    overlap = sum(1 for w in a_words if w in b)
-
-    return overlap >= 2
+# ========================
+# VALIDATION
+# ========================
+def is_valid_price(price):
+    return 0 < price < 1
 
 
-def find_edges(kalshi_markets, poly_markets):
-    found = False
+def is_valid_volume(volume):
+    return volume >= MIN_VOLUME
 
-    for k in kalshi_markets:
-        for p in poly_markets:
-            if not titles_match(k["title"], p["title"]):
+
+# ========================
+# MATCHING
+# ========================
+def is_match(q1, q2):
+    words1 = set(q1.split())
+    words2 = set(q2.split())
+
+    common = words1.intersection(words2)
+
+    return len(common) >= 3
+
+
+# ========================
+# EDGE DETECTION
+# ========================
+def find_edges(kalshi, poly):
+    found = 0
+    checked = 0
+
+    for k in kalshi:
+        if not is_valid_price(k["price"]) or not is_valid_volume(k["volume"]):
+            continue
+
+        for p in poly:
+            if not is_valid_price(p["price"]) or not is_valid_volume(p["volume"]):
                 continue
 
-            edge = p["yes_price"] - k["yes_price"]
+            if not is_match(k["question"], p["question"]):
+                continue
 
-            if abs(edge) >= EDGE_THRESHOLD:
-                found = True
-                print("\n🚨 EDGE FOUND 🚨")
-                print(f"[{now()}] Market: {k['title'][:100]}")
-                print(f"Kalshi: {k['yes_price']:.4f} | Vol: {k['volume']:.2f} | {k['ticker']}")
-                print(f"Poly:   {p['yes_price']:.4f} | Vol: {p['volume']:.2f} | {p['slug']}")
+            checked += 1
+
+            edge = abs(k["price"] - p["price"])
+
+            # 🔥 BLOQUEIO CRÍTICO: só edge real
+            if edge < EDGE_THRESHOLD:
+                continue
+
+            # 🔥 LIMITADOR DE LOG
+            if found < 3:
+                print(f"\n🚨 EDGE FOUND 🚨")
+                print(f"[{now()}] Market: {k['question'][:80]}")
+                print(f"Kalshi: {k['price']:.4f} | Vol: {k['volume']:.2f}")
+                print(f"Poly:   {p['price']:.4f} | Vol: {p['volume']:.2f}")
                 print(f"Edge:   {edge:.4f}")
-                print("-" * 80)
+                print("-" * 60)
 
-    if not found:
+            found += 1
+
+    print(f"[{now()}] Checked: {checked} | Found: {found}")
+
+    if found == 0:
         print(f"[{now()}] Nenhuma oportunidade acima de {EDGE_THRESHOLD}")
 
 
+# ========================
+# MAIN LOOP
+# ========================
 def main():
     while True:
         try:
-            print("\n--- scanning ---")
+            print(f"\n--- scanning ---")
+
             kalshi = fetch_kalshi()
             poly = fetch_polymarket()
 
-            print(f"[{now()}] Kalshi markets: {len(kalshi)}")
-            print(f"[{now()}] Polymarket markets: {len(poly)}")
+            print(f"[{now()}] Kalshi: {len(kalshi)} markets")
+            print(f"[{now()}] Poly:   {len(poly)} markets")
 
             find_edges(kalshi, poly)
 
