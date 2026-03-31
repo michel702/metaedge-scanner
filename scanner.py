@@ -20,7 +20,7 @@ POLY_LIMIT = int(os.getenv("POLY_LIMIT", "500"))
 MAX_ALERTS_PER_LOOP = int(os.getenv("MAX_ALERTS_PER_LOOP", "5"))
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/5.0",
+    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/6.0",
     "Accept": "application/json",
 }
 
@@ -62,48 +62,20 @@ def tokenize(text: str):
         "will", "be", "is", "are", "yes", "no", "market", "markets",
         "with", "and", "or", "this", "that", "than", "from",
         "who", "what", "when", "where", "how", "if", "does", "do",
-        "did", "into", "after", "before", "under", "over"
+        "did", "into", "after", "before", "under", "over",
+        "which", "party", "control", "price", "point", "points",
+        "score", "scored", "wins", "win"
     }
     words = normalize_text(text).split()
     return [w for w in words if len(w) > 2 and w not in stopwords]
 
 
 def is_valid_price(price: float) -> bool:
-    # relaxado para Kalshi não zerar tudo
     return price is not None and 0.01 < price < 0.99
 
 
 def is_valid_volume(volume: float, min_volume: float) -> bool:
     return volume is not None and volume >= min_volume
-
-
-def overlap_score(title_a: str, title_b: str) -> int:
-    a_tokens = set(tokenize(title_a))
-    b_tokens = set(tokenize(title_b))
-    if not a_tokens or not b_tokens:
-        return 0
-    return len(a_tokens.intersection(b_tokens))
-
-
-def titles_match(title_a: str, title_b: str) -> bool:
-    a = normalize_text(title_a)
-    b = normalize_text(title_b)
-
-    if not a or not b:
-        return False
-
-    score = overlap_score(a, b)
-
-    if score >= 3:
-        return True
-
-    if score >= 2:
-        a_first = " ".join(tokenize(a)[:4])
-        b_first = " ".join(tokenize(b)[:4])
-        if a_first and b_first and (a_first in b or b_first in a):
-            return True
-
-    return False
 
 
 def alert_key(k_title: str, p_title: str, edge: float) -> str:
@@ -135,6 +107,41 @@ def safe_get_json(url, params=None):
     except Exception as e:
         print(f"[{now()}] REQUEST ERROR -> {url} -> {e}")
         return None
+
+
+# =========================
+# MATCHING
+# =========================
+def titles_match(title_a: str, title_b: str) -> bool:
+    a_tokens = set(tokenize(title_a))
+    b_tokens = set(tokenize(title_b))
+
+    if not a_tokens or not b_tokens:
+        return False
+
+    common = a_tokens.intersection(b_tokens)
+
+    # regra 1: match forte
+    if len(common) >= 2:
+        return True
+
+    # regra 2: palavra importante compartilhada
+    important_words = {
+        "trump", "biden", "democrats", "republicans", "senate", "house",
+        "fed", "rates", "inflation", "cpi", "bitcoin", "ethereum",
+        "solana", "tesla", "apple", "spacex", "putin", "zelensky",
+        "lula", "bolsonaro", "election", "elections", "president",
+        "btc", "eth"
+    }
+
+    if any(word in a_tokens and word in b_tokens for word in important_words):
+        return True
+
+    # regra 3: fallback leve
+    if len(common) >= 1 and (len(a_tokens) + len(b_tokens)) < 10:
+        return True
+
+    return False
 
 
 # =========================
@@ -205,7 +212,10 @@ def fetch_kalshi():
             "source": "kalshi",
         })
 
-    print(f"[{now()}] Kalshi raw={len(raw_markets)} usable={len(markets)} skipped_volume={skipped_volume} skipped_price={skipped_price}")
+    print(
+        f"[{now()}] Kalshi raw={len(raw_markets)} usable={len(markets)} "
+        f"skipped_volume={skipped_volume} skipped_price={skipped_price}"
+    )
     return markets
 
 
@@ -279,7 +289,10 @@ def fetch_polymarket():
             "source": "polymarket",
         })
 
-    print(f"[{now()}] Poly raw={len(data)} usable={len(markets)} skipped_volume={skipped_volume} skipped_price={skipped_price}")
+    print(
+        f"[{now()}] Poly raw={len(data)} usable={len(markets)} "
+        f"skipped_volume={skipped_volume} skipped_price={skipped_price}"
+    )
     return markets
 
 
