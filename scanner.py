@@ -12,7 +12,7 @@ import requests
 # CONFIG
 # =========================
 EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.10"))
-MIN_KALSHI_VOL = float(os.getenv("MIN_KALSHI_VOL", "1000"))
+MIN_KALSHI_VOL = float(os.getenv("MIN_KALSHI_VOL", "0"))
 MIN_POLY_VOL = float(os.getenv("MIN_POLY_VOL", "1000"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))
 KALSHI_LIMIT = int(os.getenv("KALSHI_LIMIT", "1000"))
@@ -20,7 +20,7 @@ POLY_LIMIT = int(os.getenv("POLY_LIMIT", "500"))
 MAX_ALERTS_PER_LOOP = int(os.getenv("MAX_ALERTS_PER_LOOP", "5"))
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/4.0",
+    "User-Agent": "Mozilla/5.0 MetaEdgeScanner/5.0",
     "Accept": "application/json",
 }
 
@@ -69,7 +69,8 @@ def tokenize(text: str):
 
 
 def is_valid_price(price: float) -> bool:
-    return price is not None and 0.05 < price < 0.95
+    # relaxado para Kalshi não zerar tudo
+    return price is not None and 0.01 < price < 0.99
 
 
 def is_valid_volume(volume: float, min_volume: float) -> bool:
@@ -92,6 +93,7 @@ def titles_match(title_a: str, title_b: str) -> bool:
         return False
 
     score = overlap_score(a, b)
+
     if score >= 3:
         return True
 
@@ -176,6 +178,9 @@ def fetch_kalshi():
     raw_markets = data.get("markets", [])
     markets = []
 
+    skipped_volume = 0
+    skipped_price = 0
+
     for m in raw_markets:
         title = normalize_text(m.get("title", ""))
         volume = to_float(m.get("volume", 0))
@@ -183,9 +188,13 @@ def fetch_kalshi():
 
         if not title:
             continue
+
         if not is_valid_volume(volume, MIN_KALSHI_VOL):
+            skipped_volume += 1
             continue
+
         if price is None or not is_valid_price(price):
+            skipped_price += 1
             continue
 
         markets.append({
@@ -196,6 +205,7 @@ def fetch_kalshi():
             "source": "kalshi",
         })
 
+    print(f"[{now()}] Kalshi raw={len(raw_markets)} usable={len(markets)} skipped_volume={skipped_volume} skipped_price={skipped_price}")
     return markets
 
 
@@ -242,6 +252,9 @@ def fetch_polymarket():
 
     markets = []
 
+    skipped_volume = 0
+    skipped_price = 0
+
     for m in data:
         title = normalize_text(m.get("question", ""))
         volume = to_float(m.get("volume", 0))
@@ -249,9 +262,13 @@ def fetch_polymarket():
 
         if not title:
             continue
+
         if not is_valid_volume(volume, MIN_POLY_VOL):
+            skipped_volume += 1
             continue
+
         if price is None or not is_valid_price(price):
+            skipped_price += 1
             continue
 
         markets.append({
@@ -262,6 +279,7 @@ def fetch_polymarket():
             "source": "polymarket",
         })
 
+    print(f"[{now()}] Poly raw={len(data)} usable={len(markets)} skipped_volume={skipped_volume} skipped_price={skipped_price}")
     return markets
 
 
@@ -283,7 +301,7 @@ def find_edges(kalshi_markets, poly_markets):
             matched_pairs += 1
             edge = p["yes_price"] - k["yes_price"]
 
-            # só edge positivo e acima do threshold
+            # só edge positivo
             if edge < EDGE_THRESHOLD:
                 continue
 
